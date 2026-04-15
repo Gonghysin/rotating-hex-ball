@@ -114,7 +114,7 @@ class Ball:
         self.max_trail = 80
 
     def update(self, hexagon: Hexagon):
-        steps = 4
+        steps = 16
         dt = 1.0 / steps
         for _ in range(steps):
             self.vel += GRAVITY * dt
@@ -125,42 +125,100 @@ class Ball:
         if len(self.trail) > self.max_trail:
             self.trail.pop(0)
 
-    def _handle_collision(self, hexagon: Hexagon):
+    def _is_inside(self, pos: Vector2, hexagon: Hexagon) -> bool:
+        # Convex polygon interior test (counter-clockwise vertices)
         for i in range(6):
             a = hexagon.vertices[i]
             b = hexagon.vertices[(i + 1) % 6]
-
             edge = b - a
-            edge_len_sq = edge.length_squared()
-            if edge_len_sq == 0:
-                continue
+            to_point = pos - a
+            cross = edge.x * to_point.y - edge.y * to_point.x
+            if cross < 0:
+                return False
+        return True
 
-            t = max(0.0, min(1.0, (self.pos - a).dot(edge) / edge_len_sq))
-            closest = a + edge * t
+    def _resolve_edge_collision(self, a: Vector2, b: Vector2, hexagon: Hexagon) -> bool:
+        edge = b - a
+        edge_len_sq = edge.length_squared()
+        if edge_len_sq == 0:
+            return False
 
-            diff = self.pos - closest
-            dist = diff.length()
+        t = max(0.0, min(1.0, (self.pos - a).dot(edge) / edge_len_sq))
+        closest = a + edge * t
 
-            if dist < self.radius and dist > 0:
-                normal = -diff / dist
-                to_center = hexagon.center - closest
-                if normal.dot(to_center) < 0:
-                    normal = -normal
+        diff = self.pos - closest
+        dist = diff.length()
 
-                rel = closest - hexagon.center
-                v_wall = Vector2(-rel.y, rel.x) * hexagon.omega
+        if dist < self.radius and dist > 0:
+            normal = -diff / dist
+            to_center = hexagon.center - closest
+            if normal.dot(to_center) < 0:
+                normal = -normal
 
-                v_rel = self.vel - v_wall
+            rel = closest - hexagon.center
+            v_wall = Vector2(-rel.y, rel.x) * hexagon.omega
 
-                if v_rel.dot(normal) > 0:
+            v_rel = self.vel - v_wall
+
+            if v_rel.dot(normal) > 0:
+                return False
+
+            # Reflect with energy loss (restitution)
+            v_rel_new = v_rel - (1 + self.restitution) * v_rel.dot(normal) * normal
+            self.vel = v_wall + v_rel_new
+
+            penetration = self.radius - dist
+            self.pos += normal * penetration
+            return True
+        return False
+
+    def _handle_collision(self, hexagon: Hexagon):
+        # Iterative collision resolution (up to 3 passes)
+        for _ in range(3):
+            collided = False
+            for i in range(6):
+                a = hexagon.vertices[i]
+                b = hexagon.vertices[(i + 1) % 6]
+                if self._resolve_edge_collision(a, b, hexagon):
+                    collided = True
+            if not collided:
+                break
+
+        # Safety: if ball tunneled outside, force it back to the nearest edge
+        if not self._is_inside(self.pos, hexagon):
+            best_dist = float('inf')
+            best_normal = Vector2(0, 0)
+            best_closest = Vector2(0, 0)
+            for i in range(6):
+                a = hexagon.vertices[i]
+                b = hexagon.vertices[(i + 1) % 6]
+                edge = b - a
+                edge_len_sq = edge.length_squared()
+                if edge_len_sq == 0:
                     continue
+                t = max(0.0, min(1.0, (self.pos - a).dot(edge) / edge_len_sq))
+                closest = a + edge * t
+                diff = self.pos - closest
+                dist = diff.length()
+                if dist < best_dist:
+                    best_dist = dist
+                    best_closest = closest
+                    normal = -diff / dist if dist > 0 else Vector2(0, -1)
+                    to_center = hexagon.center - closest
+                    if normal.dot(to_center) < 0:
+                        normal = -normal
+                    best_normal = normal
 
-                # Reflect with energy loss (restitution)
-                v_rel_new = v_rel - (1 + self.restitution) * v_rel.dot(normal) * normal
-                self.vel = v_wall + v_rel_new
+            # Push back inside and dampen velocity
+            self.pos = best_closest + best_normal * (self.radius + 1)
+            self.vel -= self.vel.dot(best_normal) * best_normal * 0.5
 
-                penetration = self.radius - dist
-                self.pos += normal * penetration
+    def mechanical_energy(self) -> float:
+        # Assume unit mass (m = 1)
+        ke = 0.5 * self.vel.length_squared()
+        # Potential energy: m * g * h, with h measured from bottom of screen
+        pe = GRAVITY.y * (HEIGHT - self.pos.y)
+        return ke + pe
 
     def draw(self, surface):
         if len(self.trail) > 1:
@@ -247,8 +305,14 @@ def main():
             True,
             (200, 200, 200),
         )
+        line3 = font.render(
+            f"Mechanical Energy: {ball.mechanical_energy():.1f}",
+            True,
+            (255, 200, 100),
+        )
         screen.blit(line1, (10, 10))
         screen.blit(line2, (10, 30))
+        screen.blit(line3, (10, 50))
 
         restitution_slider.draw(screen)
         energy_slider.draw(screen)
